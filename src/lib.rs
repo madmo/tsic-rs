@@ -48,8 +48,8 @@
 #![warn(missing_docs, rust_2018_idioms, unused_qualifications)]
 
 use core::time::Duration;
-use embedded_hal::blocking::delay::DelayUs;
-use embedded_hal::digital::v2::{InputPin, OutputPin};
+use embedded_hal::delay::DelayNs;
+use embedded_hal::digital::{Error, ErrorType, InputPin, OutputPin};
 
 /// The spec defines the sample rate as 128kHz, which is 7.8 microseconds. Since
 /// we can only sleep for a round number of micros, 8 micros should be close enough.
@@ -127,7 +127,7 @@ impl<I: InputPin, O: OutputPin> Tsic<I, O> {
     /// In case there is an error during the read phase and if the `Tsic` has been constructed
     /// to manage the VDD pin as well, it will try to shut it down in a best-effort manner as
     /// well.
-    pub fn read<D: DelayUs<u8>>(&mut self, delay: &mut D) -> Result<Temperature, TsicError> {
+    pub fn read<D: DelayNs>(&mut self, delay: &mut D) -> Result<Temperature, TsicError> {
         self.maybe_power_up_sensor(delay)?;
 
         let first_packet = match self.read_packet(delay) {
@@ -155,10 +155,10 @@ impl<I: InputPin, O: OutputPin> Tsic<I, O> {
     ///
     /// If we are managing the VDD pin for the user, we need to power up the sensor and then
     /// apply an initial delay before the reading can continue.
-    fn maybe_power_up_sensor<D: DelayUs<u8>>(&mut self, delay: &mut D) -> Result<(), TsicError> {
+    fn maybe_power_up_sensor<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), TsicError> {
         if let Some(ref mut pin) = self.vdd_pin {
             pin.set_high().map_err(|_| TsicError::PinWriteError)?;
-            delay.delay_us(VDD_POWER_UP_DELAY.as_micros() as u8);
+            delay.delay_us(VDD_POWER_UP_DELAY.as_micros() as u32);
         }
         Ok(())
     }
@@ -179,12 +179,12 @@ impl<I: InputPin, O: OutputPin> Tsic<I, O> {
     /// From the documentation of the sensor:
     ///
     /// When the falling edge of the start bit occurs, measure the time until the
-    /// rising edge of the start bit. This time is the strobe time.  
+    /// rising edge of the start bit. This time is the strobe time.
     /// When the next falling edge occurs, wait for a time period equal to
     /// the strobe time, and then sample the signal. The data present on the signal
-    /// at this time is the bit being transmitted. Because every bit starts  
-    /// with a falling edge, the sampling window is reset with every bit  
-    /// transmission. This means errors will not accrue for bits downstream  
+    /// at this time is the bit being transmitted. Because every bit starts
+    /// with a falling edge, the sampling window is reset with every bit
+    /// transmission. This means errors will not accrue for bits downstream
     /// from the start bit, as it would with a protocol such as RS232. It is
     /// recommended, however, that the sampling rate of the signal when acquiring
     /// the start bit be at least 16x the nominal baud rate. Because the nominal
@@ -193,10 +193,10 @@ impl<I: InputPin, O: OutputPin> Tsic<I, O> {
     ///
     /// See https://www.ist-ag.com/sites/default/files/ATTSic_E.pdf for
     /// the full document.
-    fn read_packet<D: DelayUs<u8>>(&self, delay: &mut D) -> Result<Packet, TsicError> {
+    fn read_packet<D: DelayNs>(&mut self, delay: &mut D) -> Result<Packet, TsicError> {
         self.wait_until_low()?;
 
-        let strobe_len = self.strobe_len(delay)?.as_micros() as u8;
+        let strobe_len = self.strobe_len(delay)?.as_micros() as u32;
 
         let mut packet_bits: u16 = 0;
 
@@ -223,13 +223,13 @@ impl<I: InputPin, O: OutputPin> Tsic<I, O> {
     /// read attempt.
     ///
     /// The strobe length should be around 60 microseconds.
-    fn strobe_len<D: DelayUs<u8>>(&self, delay: &mut D) -> Result<Duration, TsicError> {
+    fn strobe_len<D: DelayNs>(&mut self, delay: &mut D) -> Result<Duration, TsicError> {
         let sampling_rate = STROBE_SAMPLING_RATE.as_micros();
 
         let mut strobe_len = 0;
         while self.is_low()? {
             strobe_len += sampling_rate;
-            delay.delay_us(sampling_rate as u8);
+            delay.delay_us(sampling_rate as u32);
         }
 
         if strobe_len > 0 {
@@ -240,27 +240,27 @@ impl<I: InputPin, O: OutputPin> Tsic<I, O> {
     }
 
     /// Checks if the pin is currently in a high state.
-    fn is_high(&self) -> Result<bool, TsicError> {
+    fn is_high(&mut self) -> Result<bool, TsicError> {
         self.signal_pin
             .is_high()
             .map_err(|_| TsicError::PinReadError)
     }
 
     /// Checks if the pin is currently in a low state.
-    fn is_low(&self) -> Result<bool, TsicError> {
+    fn is_low(&mut self) -> Result<bool, TsicError> {
         self.signal_pin
             .is_low()
             .map_err(|_| TsicError::PinReadError)
     }
 
     /// Returns only once the pin is in a low state.
-    fn wait_until_low(&self) -> Result<(), TsicError> {
+    fn wait_until_low(&mut self) -> Result<(), TsicError> {
         while self.is_high()? {}
         Ok(())
     }
 
     /// Returns only once the pin is in a high state.
-    fn wait_until_high(&self) -> Result<(), TsicError> {
+    fn wait_until_high(&mut self) -> Result<(), TsicError> {
         while self.is_low()? {}
         Ok(())
     }
@@ -406,14 +406,29 @@ impl SensorType {
 pub struct DummyOutputPin;
 
 impl OutputPin for DummyOutputPin {
-    type Error = ();
-
     fn set_low(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
     fn set_high(&mut self) -> Result<(), Self::Error> {
         Ok(())
+    }
+}
+
+impl ErrorType for DummyOutputPin {
+    type Error = DummyError;
+}
+
+/// Dummy error type used to satisfy the generics when no explicit error type is provided.
+#[derive(Debug)]
+pub enum DummyError {
+    /// Dummy error variant used to satisfy the generics when no explicit error type is provided.
+    DummyError,
+}
+
+impl Error for DummyError {
+    fn kind(&self) -> embedded_hal::digital::ErrorKind {
+        embedded_hal::digital::ErrorKind::Other
     }
 }
 
